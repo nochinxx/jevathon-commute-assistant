@@ -270,8 +270,19 @@ export async function GET(req: Request) {
       larkspur: [9 * 60, 10 * 60, 10 * 60 + 45, 11 * 60 + 30, 12 * 60 + 15, 13 * 60 + 30, 14 * 60 + 15, 15 * 60, 15 * 60 + 45, 16 * 60 + 30, 17 * 60 + 15, 18 * 60, 18 * 60 + 45],
       tiburon: [11 * 60 + 50, 12 * 60 + 55, 14 * 60 + 45, 17 * 60 + 10],
     };
-    const now = new Date();
-    const nowMin = now.getHours() * 60 + now.getMinutes();
+    // Schedules are published in local SF time, but Vercel's servers run in
+    // UTC -- Date.getHours() reads the wrong clock entirely there. Found
+    // live: the dashboard thought it was 10pm UTC when it was 3pm in SF, so
+    // every ferry looked already missed.
+    const nowParts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Los_Angeles",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(new Date());
+    const nowMin =
+      Number(nowParts.find((p) => p.type === "hour")?.value ?? "0") * 60 +
+      Number(nowParts.find((p) => p.type === "minute")?.value ?? "0");
     const schedule = SCHEDULES[arrivalTerminal.name] ?? [];
     let ferryEta: number | null = null;
     for (const t of schedule) {

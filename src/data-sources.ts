@@ -272,10 +272,26 @@ const FERRY_SCHEDULE: Record<string, string[]> = {
   tiburon: ["11:50", "12:55", "14:45", "17:10"],
 };
 
+/** Minutes since midnight, Pacific time -- schedules are published in local
+ * SF time, but a deployed server (e.g. Vercel) runs in UTC, so using
+ * `Date.getHours()` directly reads the wrong clock entirely (found live:
+ * the dashboard thought it was 10pm UTC when it was 3pm in SF, so every
+ * ferry looked already missed). */
+function pacificMinutesNow(): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0");
+  const minute = Number(parts.find((p) => p.type === "minute")?.value ?? "0");
+  return hour * 60 + minute;
+}
+
 export function getFerrySchedule(terminal: "larkspur" | "sausalito" | "tiburon"): TransportOption {
   const times = FERRY_SCHEDULE[terminal] ?? [];
-  const now = new Date();
-  const nowMinutes = now.getHours() * 60 + now.getMinutes();
+  const nowMinutes = pacificMinutesNow();
 
   let etaMinutes: number | null = null;
   for (const t of times) {
