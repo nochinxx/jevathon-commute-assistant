@@ -24,18 +24,16 @@ Commute Copilot is the decision layer on top of the data Maps already has: given
 | Bike/scooter (live) | [GBFS](https://gbfs.org) `free_bike_status` feed (Bay Wheels) | Open, standardized, no-auth format used by most bike-share systems |
 | Traffic incidents (live) | 511.org Traffic Events API | Real active incidents with coordinates, same token as transit |
 | Destination geocoding | OpenStreetMap Nominatim | Free, no key, turns "Mill Valley" into real coordinates |
-| Google Maps comparison | Browserbase + Stagehand | The one thing with no free API — scraping is the only way to get Maps' own live answer, used as an honest comparison baseline, not a data source we depend on |
+| Google Maps (comparison + walk time) | Browserbase + Stagehand | The one thing with no free API. Used two ways: as an honest side-by-side comparison against Jev's pick, and to get a *real* walking time to a ferry terminal (a straight-line distance estimate can say "4 min away" for a walk that's actually 7) — cached per route since walking pace doesn't change with traffic, with a distance-based estimate as a fallback if the scrape is slow or fails |
 | Decision engine | [Jev](https://typesafe.ai) `Choice` primitive | Given the live options + your stated goal, picks (and ranks) the best one with a real probability distribution |
 | Interface | [Photon / Spectrum](https://photon.codes) | One agent, delivered over iMessage — no app to open |
-| Dashboard | Next.js on Vercel | Same data + decision logic, visualized: live map, colored route options, Jev's pick highlighted in green, live vs. Maps side by side |
+| Dashboard | Next.js on Vercel | Same data + decision logic, visualized: live map, colored route options, Jev's pick highlighted in green, a full decision trace (every option considered, live data behind it, exclusions with real reasons, the literal request sent to Jev), a live feed of recent requests from either surface, and live vs. Maps side by side |
 
 **Why Jev specifically, not a general LLM:** every decision here is a *discrete choice among a small, known set of options* (this bus vs. this ferry vs. a scooter), re-evaluated as conditions change — not a search/optimization problem. That's Jev's exact shape, and its cost profile ($0.042/MTok input, output free, 70–500ms) is what makes it viable to re-run this on every message instead of caching a single answer.
 
 ## What's real vs. what's simplified
 
-Being direct about this rather than letting a judge find it first:
-
-- **Real:** every data source above is live and independently verifiable — open the same public URLs yourself and the numbers will match what the app just used.
+- **Real:** every data source above is live and independently verifiable — open the same public URLs yourself and the numbers will match what the app just used. Options aren't just filtered by "is something nearby" — a scooter or a single local Muni stop is excluded outright once the destination requires crossing the bay or is beyond a realistic range, with the reason stated, not just quietly left off.
 - **Origin is fixed** to the CodeRabbit office (201 Spear St) for this demo — there's no GPS/location-sharing available through iMessage, so the destination comes from what you type and the origin is a known fixed point rather than fabricated.
 - **Route paths on the dashboard are straight-line legs**, not turn-by-turn routing — there's no free turn-by-turn API in scope for a 3-hour build.
 - **Ferry ETA on the dashboard's trip planner uses the fixed schedule as a same-day approximation**, not a live feed (ferries don't have one — they're not late).
@@ -48,7 +46,7 @@ pnpm start          # the iMessage agent (src/index.ts)
 cd dashboard && pnpm dev   # the web dashboard
 ```
 
-Needs a `.env` (agent) / `.env.local` (dashboard) with `PROJECT_ID`/`PROJECT_SECRET` (Photon), `FIVE_ELEVEN_TOKEN`, `TYPESAFE_API_KEY`, and `BROWSERBASE_API_KEY`.
+Needs a `.env` (agent, see `.env.example`) with `PROJECT_ID`/`PROJECT_SECRET` (Photon), `FIVE_ELEVEN_TOKEN`, `TYPESAFE_API_KEY`, `DASHBOARD_URL`, and `TRIP_LOG_SECRET`. The dashboard needs its own `.env.local` with `FIVE_ELEVEN_TOKEN`, `TYPESAFE_API_KEY`, `BROWSERBASE_API_KEY`, and the same `TRIP_LOG_SECRET` (it's what authenticates the agent's requests to `/api/trip-log`).
 
 ## What's next
 
