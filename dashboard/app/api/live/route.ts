@@ -25,11 +25,12 @@ async function getLiveVehicles(): Promise<MapNode[]> {
   try {
     const res = await fetch(
       `http://api.511.org/transit/VehicleMonitoring?api_key=${FIVE_ELEVEN_TOKEN}&agency=SF&format=json`,
-      { headers: { "Accept-Encoding": "gzip" } }
     );
     if (!res.ok) return [];
-    const buf = await res.arrayBuffer();
-    const text = new TextDecoder("utf-8").decode(buf).replace(/^﻿/, "");
+    // Let fetch handle decompression transparently (matches how the working
+    // GBFS call is written) -- manually requesting gzip and hand-decoding the
+    // raw bytes was fragile and behaved differently across runtimes.
+    const text = (await res.text()).replace(/^﻿/, "");
     const data = JSON.parse(text);
     const activities =
       data?.Siri?.ServiceDelivery?.VehicleMonitoringDelivery?.VehicleActivity ?? [];
@@ -78,11 +79,12 @@ async function getTrafficEvents(): Promise<MapNode[]> {
   try {
     const res = await fetch(
       `http://api.511.org/traffic/events?api_key=${FIVE_ELEVEN_TOKEN}&format=json`,
-      { headers: { "Accept-Encoding": "gzip" } }
     );
     if (!res.ok) return [];
-    const buf = await res.arrayBuffer();
-    const text = new TextDecoder("utf-8").decode(buf).replace(/^﻿/, "");
+    // Let fetch handle decompression transparently (matches how the working
+    // GBFS call is written) -- manually requesting gzip and hand-decoding the
+    // raw bytes was fragile and behaved differently across runtimes.
+    const text = (await res.text()).replace(/^﻿/, "");
     const data = JSON.parse(text);
     const events: any[] = data?.events ?? [];
     return events
