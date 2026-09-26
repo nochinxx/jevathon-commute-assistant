@@ -27,8 +27,11 @@ export async function decide(
     (o) => `${o.mode}: ETA ${o.etaMinutes} min, reliability: ${o.reliability}`
   );
   if (nextCommitment) {
+    const deadlinePart = nextCommitment.whenISO
+      ? `, needs to arrive by ${new Date(nextCommitment.whenISO).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} (factor lateness risk against this deadline when scoring options)`
+      : " (no specific deadline stated -- optimize for soonest/most reliable arrival)";
     stateLines.push(
-      `User's next commitment: "${nextCommitment.what}" at ${nextCommitment.where}, needs to arrive by ${nextCommitment.whenISO}.`
+      `User's destination: "${nextCommitment.where}", goal: "${nextCommitment.what}"${deadlinePart}.`
     );
   }
 
