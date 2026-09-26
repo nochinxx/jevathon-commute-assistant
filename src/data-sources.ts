@@ -97,11 +97,15 @@ const FILLER_WORDS = new Set([
  * (most specific) first.
  */
 export function extractPlaceQueries(text: string): string[] {
-  // Strip deadline expressions ("by 9am", "by 4:30 pm") BEFORE extraction --
-  // otherwise "mill valley by 4pm" becomes the candidate "mill valley 4pm",
-  // which fails to geocode. Found live during demo testing: this broke
-  // every message using the bot's own suggested "...by 9am" format.
-  const withoutDeadline = text.replace(/\bby\s+\d{1,2}(?::\d{2})?\s*(am|pm)?\b/gi, " ");
+  // Strip deadline expressions BEFORE extraction -- otherwise "mill valley
+  // by 4pm" / "mill valley around 4" becomes a candidate with the number
+  // still attached, which fails to geocode. Found live during demo testing
+  // with two different real phrasings ("by 9am" and "around 4") -- cover
+  // the common time-preposition + number pattern generally, not just "by".
+  const withoutDeadline = text
+    .replace(/\b(by|around|at|before|near|about)\s+\d{1,2}(:\d{2})?\s*(am|pm)?\b/gi, " ")
+    // Also strip a bare trailing time with no preposition at all ("...valley 4pm").
+    .replace(/\b\d{1,2}(:\d{2})?\s*(am|pm)\b/gi, " ");
   const cleaned = withoutDeadline.toLowerCase().replace(/[^a-z0-9\s']/g, " ");
   const segments = cleaned.split(/\bto\b|\bfrom\b|\bform\b/);
 

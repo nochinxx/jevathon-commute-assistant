@@ -40,7 +40,7 @@ const ORIGIN_LABEL = "the CodeRabbit office (201 Spear St)";
  * passed today) -- or null if no time was stated. Returning null and saying
  * so honestly beats fabricating a deadline that was never actually said. */
 function extractDeadlineISO(text: string): string | null {
-  const match = text.match(/\bby\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i);
+  const match = text.match(/\b(?:by|around|at|before|near|about)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i);
   return match ? timeMatchToISO(match) : null;
 }
 
