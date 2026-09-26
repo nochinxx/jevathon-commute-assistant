@@ -62,7 +62,10 @@ export async function getWalkMinutes(
   fromLng: number,
   toLat: number,
   toLng: number,
-  timeoutMs = 6000
+  // The scrape itself has a fixed 5s wait built in (page load + render) on
+  // top of Browserbase launch + navigation + extraction -- 6s was cutting it
+  // off before it ever had a real chance, silently falling back every time.
+  timeoutMs = 20000
 ): Promise<WalkTimeResult> {
   const key = `${fromLat.toFixed(4)},${fromLng.toFixed(4)}->${toLat.toFixed(4)},${toLng.toFixed(4)}`;
   const cached = cache.get(key);

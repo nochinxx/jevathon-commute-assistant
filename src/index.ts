@@ -138,7 +138,9 @@ async function logTripToDashboard(payload: unknown): Promise<void> {
 async function getWalkMinutes(fromLat: number, fromLng: number, toLat: number, toLng: number): Promise<number> {
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 7000);
+    // Give the dashboard's own internal timeout (20s) room to actually fire
+    // and fall back to its own estimate before we cut the request off here.
+    const timeout = setTimeout(() => controller.abort(), 25000);
     const res = await fetch(
       `${DASHBOARD_URL}/api/walk-time?fromLat=${fromLat}&fromLng=${fromLng}&toLat=${toLat}&toLng=${toLng}`,
       { signal: controller.signal }
