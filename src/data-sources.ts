@@ -109,3 +109,74 @@ export async function getBikeScooterAvailability(
     return null;
   }
 }
+
+/** Straight-line distance in km (haversine). Good enough for a rough time
+ * estimate over these short urban distances -- not turn-by-turn routing. */
+function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+const SCOOTER_SPEED_KMH = 15; // typical e-bike/scooter urban speed
+const WALK_SPEED_KMH = 4.8;
+
+/**
+ * Combo option: walk to the nearest available bike/scooter, ride it to a
+ * ferry terminal, then take the next ferry from there. Only returned if a
+ * nearby vehicle actually exists (real data, not assumed) and the terminal
+ * is within a plausible scooter-ride distance.
+ */
+export async function getScooterToFerryCombo(
+  userLat: number,
+  userLng: number,
+  terminal: "larkspur" | "sausalito" | "tiburon",
+  terminalLat: number,
+  terminalLng: number
+): Promise<TransportOption | null> {
+  try {
+    const res = await fetch("https://gbfs.lyft.com/gbfs/1.1/bay/en/free_bike_status.json");
+    if (!res.ok) return null;
+    const data = await res.json();
+    const bikes: any[] = data?.data?.bikes ?? [];
+    const usable = bikes.filter((b) => !b.is_disabled && !b.is_reserved);
+    if (usable.length === 0) return null;
+
+    // Nearest available vehicle to the user right now.
+    let nearest = usable[0];
+    let nearestDist = haversineKm(userLat, userLng, nearest.lat, nearest.lon);
+    for (const b of usable) {
+      const d = haversineKm(userLat, userLng, b.lat, b.lon);
+      if (d < nearestDist) {
+        nearest = b;
+        nearestDist = d;
+      }
+    }
+
+    const rideDistKm = haversineKm(nearest.lat, nearest.lon, terminalLat, terminalLng);
+    if (rideDistKm > 6) return null; // too far to be a realistic scooter leg
+
+    const walkToVehicleMin = (nearestDist / WALK_SPEED_KMH) * 60;
+    const rideMin = (rideDistKm / SCOOTER_SPEED_KMH) * 60;
+
+    const ferry = getFerrySchedule(terminal);
+    if (ferry.etaMinutes === null) return null;
+
+    const arriveAtTerminalMin = walkToVehicleMin + rideMin;
+    // Only a real combo if you'd actually make the ferry with a little buffer.
+    if (arriveAtTerminalMin > ferry.etaMinutes - 3) return null;
+
+    return {
+      mode: `scooter->${terminal} ferry`,
+      etaMinutes: ferry.etaMinutes,
+      reliability: `${Math.round(walkToVehicleMin)} min walk + ${Math.round(rideMin)} min ride to catch a fixed-schedule ferry`,
+      raw: { nearest, rideDistKm, ferry },
+    };
+  } catch {
+    return null;
+  }
+}
