@@ -224,19 +224,25 @@ for await (const [space, message] of app.messages) {
   const nearestStop = await findNearestStop(ORIGIN_LAT, ORIGIN_LNG);
 
   const destDistanceKm = haversineKm(ORIGIN_LAT, ORIGIN_LNG, destination.lat, destination.lng);
-  // A scooter/bike or a single local Muni stop can't realistically cover a
-  // cross-bay trip -- offering them as "100% confidence" options for a
-  // destination like Mill Valley (12+ km, across the Golden Gate) was the
-  // second bug: distance from the origin to the nearest stop/vehicle was
-  // being checked, but never distance to the actual destination.
-  const SCOOTER_MAX_KM = 5;
-  const BUS_MAX_KM = 15;
-  const scooterPlausible = destDistanceKm <= SCOOTER_MAX_KM;
-  const busPlausible = destDistanceKm <= BUS_MAX_KM;
-
   const ferryRelevant =
     !!boardingTerminal && !!arrivalTerminal && boardingTerminal.terminal !== arrivalTerminal.terminal;
   const boardingCoords = boardingTerminal ? FERRY_TERMINALS[boardingTerminal.terminal] : null;
+
+  // A scooter/bike or a single local Muni stop can't realistically cover a
+  // cross-bay trip -- offering them as "100% confidence" options for a
+  // destination like Mill Valley (12+ km, across the Golden Gate) was a bug:
+  // distance from the origin to the nearest stop/vehicle was being checked,
+  // but never distance to the actual destination. Distance alone isn't
+  // enough either, though -- Sausalito is only 10.7km away as the crow
+  // flies, well under a naive "bus range" cutoff, but that straight line
+  // crosses the bay, which local Muni doesn't do. If the destination's
+  // nearest ferry terminal differs from the origin's, the trip requires a
+  // bay crossing, so local bus/scooter aren't real options regardless of
+  // raw distance.
+  const SCOOTER_MAX_KM = 5;
+  const BUS_MAX_KM = 15;
+  const scooterPlausible = destDistanceKm <= SCOOTER_MAX_KM && !ferryRelevant;
+  const busPlausible = destDistanceKm <= BUS_MAX_KM && !ferryRelevant;
 
   // A fixed schedule is only actually catchable if there's enough real time
   // left to walk to the terminal -- checked live via Google Maps (see
@@ -278,10 +284,21 @@ for await (const [space, message] of app.messages) {
   // why, not just the winning answer.
   const relevanceNotes: string[] = [];
   relevanceNotes.push(`destination is ${destDistanceKm.toFixed(1)}km from ${ORIGIN_LABEL}`);
-  if (!busPlausible) relevanceNotes.push(`bus excluded: ${destDistanceKm.toFixed(1)}km is beyond a single local Muni stop's realistic range`);
-  else if (nearestStop) relevanceNotes.push(`nearest bus stop: ${nearestStop.name} (${nearestStop.distanceKm.toFixed(1)}km from origin)`);
+  if (!busPlausible) {
+    relevanceNotes.push(
+      ferryRelevant
+        ? "bus excluded: this trip crosses the bay, which local Muni doesn't do"
+        : `bus excluded: ${destDistanceKm.toFixed(1)}km is beyond a single local Muni stop's realistic range`
+    );
+  } else if (nearestStop) relevanceNotes.push(`nearest bus stop: ${nearestStop.name} (${nearestStop.distanceKm.toFixed(1)}km from origin)`);
   else relevanceNotes.push("no SF Muni stop close enough to origin to be relevant");
-  if (!scooterPlausible) relevanceNotes.push(`bike/scooter excluded: ${destDistanceKm.toFixed(1)}km is beyond a realistic scooter range (${SCOOTER_MAX_KM}km)`);
+  if (!scooterPlausible) {
+    relevanceNotes.push(
+      ferryRelevant
+        ? "bike/scooter excluded: this trip crosses the bay, not a realistic scooter ride"
+        : `bike/scooter excluded: ${destDistanceKm.toFixed(1)}km is beyond a realistic scooter range (${SCOOTER_MAX_KM}km)`
+    );
+  }
   if (!ferryRelevant) {
     relevanceNotes.push(
       !boardingTerminal || !arrivalTerminal

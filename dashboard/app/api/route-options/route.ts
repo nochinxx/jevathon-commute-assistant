@@ -223,11 +223,15 @@ export async function GET(req: Request) {
   // A scooter or a single local Muni stop can't realistically cover a
   // cross-bay trip -- checking distance to the nearest vehicle/stop but never
   // to the actual destination was the bug that let e.g. a 12km Mill Valley
-  // trip come back "100% confidence" on a scooter.
+  // trip come back "100% confidence" on a scooter. Distance alone still
+  // isn't enough, though -- Sausalito is only 10.7km away as the crow flies,
+  // well under a naive "bus range" cutoff, but that line crosses the bay,
+  // which local Muni doesn't do. If the destination needs a different ferry
+  // terminal than the origin, it's a bay crossing regardless of raw distance.
   const SCOOTER_MAX_KM = 5;
   const BUS_MAX_KM = 15;
-  const busPlausible = destDistanceKm <= BUS_MAX_KM;
-  const scooterPlausible = destDistanceKm <= SCOOTER_MAX_KM;
+  const busPlausible = destDistanceKm <= BUS_MAX_KM && !ferryRelevant;
+  const scooterPlausible = destDistanceKm <= SCOOTER_MAX_KM && !ferryRelevant;
 
   const bikes = scooterPlausible ? await getNearbyBikes(originPoint.lat, originPoint.lng) : { count: 0, nearest: null as any };
 
@@ -235,7 +239,12 @@ export async function GET(req: Request) {
   const excluded: { mode: string; reason: string }[] = [];
 
   if (!busPlausible) {
-    excluded.push({ mode: "bus", reason: `destination is ${destDistanceKm.toFixed(1)}km away, beyond a single local Muni stop's realistic range (${BUS_MAX_KM}km)` });
+    excluded.push({
+      mode: "bus",
+      reason: ferryRelevant
+        ? "this trip crosses the bay, which local Muni doesn't do"
+        : `destination is ${destDistanceKm.toFixed(1)}km away, beyond a single local Muni stop's realistic range (${BUS_MAX_KM}km)`,
+    });
   } else if (!nearestStop) {
     excluded.push({ mode: "bus", reason: "no SF Muni stop close enough to the origin to be relevant" });
   } else {
@@ -324,7 +333,12 @@ export async function GET(req: Request) {
   }
 
   if (!scooterPlausible) {
-    excluded.push({ mode: "bike_scooter", reason: `destination is ${destDistanceKm.toFixed(1)}km away, beyond a realistic scooter range (${SCOOTER_MAX_KM}km)` });
+    excluded.push({
+      mode: "bike_scooter",
+      reason: ferryRelevant
+        ? "this trip crosses the bay, not a realistic scooter ride"
+        : `destination is ${destDistanceKm.toFixed(1)}km away, beyond a realistic scooter range (${SCOOTER_MAX_KM}km)`,
+    });
   } else if (!bikes.nearest) {
     excluded.push({ mode: "bike_scooter", reason: "no Bay Wheels vehicle nearby right now" });
   } else {
