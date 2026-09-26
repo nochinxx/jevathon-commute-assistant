@@ -136,6 +136,10 @@ for await (const [space, message] of app.messages) {
   // -- that conflation was the earlier bug ("what location is this using?").
   const destination = await resolveLocation(goal);
   if (!destination) {
+    // Clear the failed goal so the NEXT message (even something short like
+    // "Hi") is treated as a fresh attempt instead of silently retrying the
+    // same unresolvable text forever -- found live during demo testing.
+    trackedGoals.delete(space.id);
     await space.send(
       `Couldn't figure out a specific destination from that. Try naming a city or neighborhood (e.g. "Sausalito" or "Mill Valley").`
     );

@@ -97,19 +97,30 @@ const FILLER_WORDS = new Set([
  * (most specific) first.
  */
 export function extractPlaceQueries(text: string): string[] {
-  const cleaned = text.toLowerCase().replace(/[^a-z0-9\s']/g, " ");
+  // Strip deadline expressions ("by 9am", "by 4:30 pm") BEFORE extraction --
+  // otherwise "mill valley by 4pm" becomes the candidate "mill valley 4pm",
+  // which fails to geocode. Found live during demo testing: this broke
+  // every message using the bot's own suggested "...by 9am" format.
+  const withoutDeadline = text.replace(/\bby\s+\d{1,2}(?::\d{2})?\s*(am|pm)?\b/gi, " ");
+  const cleaned = withoutDeadline.toLowerCase().replace(/[^a-z0-9\s']/g, " ");
   const segments = cleaned.split(/\bto\b|\bfrom\b|\bform\b/);
 
   const candidates = new Set<string>();
   for (const seg of segments) {
     const words = seg.split(/\s+/).filter((w) => w && !FILLER_WORDS.has(w));
-    if (words.length > 0) candidates.add(words.join(" "));
+    if (words.length > 0) {
+      candidates.add(words.join(" "));
+      // Also add a shorter 1-2 word candidate from the end of the segment --
+      // place names are usually short, and a long segment (e.g. leftover
+      // descriptive words) is less likely to geocode than its tail alone.
+      if (words.length > 2) candidates.add(words.slice(-2).join(" "));
+    }
   }
   // Also try the whole message filler-stripped, as a fallback.
   const allWords = cleaned.split(/\s+/).filter((w) => w && !FILLER_WORDS.has(w));
   if (allWords.length > 0) candidates.add(allWords.join(" "));
 
-  return [...candidates].sort((a, b) => b.length - a.length);
+  return [...candidates].sort((a, b) => a.length - b.length);
 }
 
 /**
