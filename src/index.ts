@@ -10,6 +10,7 @@ import {
   findNearestTerminal,
   FERRY_TERMINALS,
   haversineKm,
+  WALK_SPEED_KMH,
 } from "./data-sources.js";
 import { decide } from "./jev.js";
 
@@ -127,6 +128,31 @@ async function logTripToDashboard(payload: unknown): Promise<void> {
   }
 }
 
+/** Real walking time from Google Maps (via the dashboard's Browserbase-backed
+ * /api/walk-time), not a straight-line distance / assumed speed -- a
+ * haversine estimate can say "4 min away" for a walk that's actually 7 min
+ * once real streets are accounted for, which is exactly what made a ferry
+ * look catchable when it wasn't. Falls back to the haversine estimate if the
+ * dashboard call is slow or fails -- a live decision shouldn't hang on a
+ * browser automation call. */
+async function getWalkMinutes(fromLat: number, fromLng: number, toLat: number, toLng: number): Promise<number> {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 7000);
+    const res = await fetch(
+      `${DASHBOARD_URL}/api/walk-time?fromLat=${fromLat}&fromLng=${fromLng}&toLat=${toLat}&toLng=${toLng}`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timeout);
+    if (!res.ok) throw new Error("walk-time request failed");
+    const data = (await res.json()) as { walkMinutes: number };
+    return data.walkMinutes;
+  } catch {
+    const km = haversineKm(fromLat, fromLng, toLat, toLng);
+    return (km / WALK_SPEED_KMH) * 60;
+  }
+}
+
 // Spectrum bridges a single agent loop to many messaging interfaces.
 // Docs: https://photon.codes/docs/spectrum-ts
 const app = await Spectrum({
@@ -210,10 +236,20 @@ for await (const [space, message] of app.messages) {
     !!boardingTerminal && !!arrivalTerminal && boardingTerminal.terminal !== arrivalTerminal.terminal;
   const boardingCoords = boardingTerminal ? FERRY_TERMINALS[boardingTerminal.terminal] : null;
 
+  // A fixed schedule is only actually catchable if there's enough real time
+  // left to walk to the terminal -- checked live via Google Maps (see
+  // getWalkMinutes), not assumed. Only fetched when a ferry is even in play.
+  const walkToBoardingMin =
+    ferryRelevant && boardingCoords
+      ? await getWalkMinutes(ORIGIN_LAT, ORIGIN_LNG, boardingCoords.lat, boardingCoords.lng)
+      : 0;
+
   const [bus, bike, ferry, combo] = await Promise.all([
     nearestStop && busPlausible ? getBusStatus(nearestStop.id, nearestStop.name) : Promise.resolve(null),
     scooterPlausible ? getBikeScooterAvailability(ORIGIN_LAT, ORIGIN_LNG) : Promise.resolve(null),
-    ferryRelevant ? Promise.resolve(getFerrySchedule(arrivalTerminal!.terminal as any)) : Promise.resolve(null),
+    ferryRelevant
+      ? Promise.resolve(getFerrySchedule(arrivalTerminal!.terminal as any, walkToBoardingMin))
+      : Promise.resolve(null),
     ferryRelevant && boardingCoords
       ? getScooterToFerryCombo(
           ORIGIN_LAT,

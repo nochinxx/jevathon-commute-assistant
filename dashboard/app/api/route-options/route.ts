@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { getWalkMinutes } from "../../../lib/walk-time";
 
 export const dynamic = "force-dynamic";
 
@@ -284,21 +285,34 @@ export async function GET(req: Request) {
       Number(nowParts.find((p) => p.type === "hour")?.value ?? "0") * 60 +
       Number(nowParts.find((p) => p.type === "minute")?.value ?? "0");
     const schedule = SCHEDULES[arrivalTerminal.name] ?? [];
+
+    // A departure only counts if there's real time left to walk to the
+    // terminal -- checked via Google Maps (see lib/walk-time.ts), not a
+    // straight-line distance assumption. "Leaves in 4 min" for a terminal
+    // that's actually a 7 min walk away is a ferry you'd miss.
+    const walk = await getWalkMinutes(originPoint.lat, originPoint.lng, boardingTerminal.lat, boardingTerminal.lng);
+    const BUFFER_MIN = 2;
     let ferryEta: number | null = null;
     for (const t of schedule) {
-      if (t >= nowMin) {
+      if (t >= nowMin + walk.walkMinutes + BUFFER_MIN) {
         ferryEta = t - nowMin;
         break;
       }
     }
     if (ferryEta === null) {
-      excluded.push({ mode: "ferry", reason: `no more ${arrivalTerminal.label} departures today` });
+      excluded.push({
+        mode: "ferry",
+        reason:
+          schedule.length === 0
+            ? `no more ${arrivalTerminal.label} departures today`
+            : `no more ${arrivalTerminal.label} departures reachable -- walk to ${boardingTerminal.label} takes ~${Math.round(walk.walkMinutes)} min (${walk.source === "google_maps" ? "Google Maps" : "estimated"})`,
+      });
     } else {
       options.push({
         mode: "ferry",
         label: `Ferry to ${arrivalTerminal.label} (board at ${boardingTerminal.label})`,
         etaMinutes: ferryEta,
-        reliability: "fixed schedule, always on time",
+        reliability: `fixed schedule, always on time -- allows ~${Math.round(walk.walkMinutes)} min to walk to the terminal (${walk.source === "google_maps" ? "Google Maps" : "estimated"})`,
         path: [
           [originPoint.lat, originPoint.lng],
           [boardingTerminal.lat, boardingTerminal.lng],

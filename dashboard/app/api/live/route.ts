@@ -3,7 +3,6 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 
 const FIVE_ELEVEN_TOKEN = process.env.FIVE_ELEVEN_TOKEN!;
-const TYPESAFE_API_KEY = process.env.TYPESAFE_API_KEY!;
 
 type MapNode = {
   id: string;
@@ -21,12 +20,24 @@ const FERRY_TERMINALS = [
   { id: "ferry-tiburon", name: "Tiburon", lat: 37.8735, lng: -122.4566 },
 ];
 
+// 511.org's free token allows 60 requests/hour -- with no server-side cache,
+// the dashboard's own 5s client polling alone burns through that in a few
+// minutes (confirmed live: "The allowed number of requests 60 per 3600
+// seconds has been exceeded" on both of these two endpoints). Cache each
+// independently so real calls to 511 stay well under quota regardless of how
+// many tabs are polling, leaving headroom for on-demand StopMonitoring calls
+// from actual trip requests, which matter more than the ambient map.
+const CACHE_MS = 180_000;
+let vehiclesCache: { data: MapNode[]; expiresAt: number } | null = null;
+let trafficCache: { data: MapNode[]; expiresAt: number } | null = null;
+
 async function getLiveVehicles(): Promise<MapNode[]> {
+  if (vehiclesCache && vehiclesCache.expiresAt > Date.now()) return vehiclesCache.data;
   try {
     const res = await fetch(
       `http://api.511.org/transit/VehicleMonitoring?api_key=${FIVE_ELEVEN_TOKEN}&agency=SF&format=json`,
     );
-    if (!res.ok) return [];
+    if (!res.ok) return vehiclesCache?.data ?? [];
     // Let fetch handle decompression transparently (matches how the working
     // GBFS call is written) -- manually requesting gzip and hand-decoding the
     // raw bytes was fragile and behaved differently across runtimes.
@@ -34,7 +45,7 @@ async function getLiveVehicles(): Promise<MapNode[]> {
     const data = JSON.parse(text);
     const activities =
       data?.Siri?.ServiceDelivery?.VehicleMonitoringDelivery?.VehicleActivity ?? [];
-    return activities
+    const vehicles = activities
       .filter((a: any) => a.MonitoredVehicleJourney?.VehicleLocation?.Latitude)
       .slice(0, 200)
       .map((a: any) => {
@@ -47,8 +58,10 @@ async function getLiveVehicles(): Promise<MapNode[]> {
           label: `${j.PublishedLineName ?? j.LineRef} -> ${j.DestinationName ?? "?"}`,
         };
       });
+    vehiclesCache = { data: vehicles, expiresAt: Date.now() + CACHE_MS };
+    return vehicles;
   } catch {
-    return [];
+    return vehiclesCache?.data ?? [];
   }
 }
 
@@ -76,18 +89,19 @@ async function getLiveBikesScooters(): Promise<MapNode[]> {
 }
 
 async function getTrafficEvents(): Promise<MapNode[]> {
+  if (trafficCache && trafficCache.expiresAt > Date.now()) return trafficCache.data;
   try {
     const res = await fetch(
       `http://api.511.org/traffic/events?api_key=${FIVE_ELEVEN_TOKEN}&format=json`,
     );
-    if (!res.ok) return [];
+    if (!res.ok) return trafficCache?.data ?? [];
     // Let fetch handle decompression transparently (matches how the working
     // GBFS call is written) -- manually requesting gzip and hand-decoding the
     // raw bytes was fragile and behaved differently across runtimes.
     const text = (await res.text()).replace(/^﻿/, "");
     const data = JSON.parse(text);
     const events: any[] = data?.events ?? [];
-    return events
+    const trafficEvents = events
       .filter((e) => e.status === "ACTIVE" && Array.isArray(e.geography?.coordinates))
       .slice(0, 30)
       .map((e) => {
@@ -101,8 +115,10 @@ async function getTrafficEvents(): Promise<MapNode[]> {
           label: headline.length > 140 ? headline.slice(0, 140) + "…" : headline,
         };
       });
+    trafficCache = { data: trafficEvents, expiresAt: Date.now() + CACHE_MS };
+    return trafficEvents;
   } catch {
-    return [];
+    return trafficCache?.data ?? [];
   }
 }
 
@@ -116,41 +132,11 @@ function getFerryNodes(): MapNode[] {
   }));
 }
 
-async function getJevSample() {
-  try {
-    const res = await fetch("https://api.typesafe.ai/v1/systemone", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${TYPESAFE_API_KEY}`,
-      },
-      body: JSON.stringify({
-        state:
-          "bus: ETA 6 min, running on time. ferry: ETA 20 min, fixed schedule, always on time. bike_scooter: ETA 2 min walk, 42 available nearby.",
-        model: "jev-latest",
-        questions: {
-          best_route: {
-            type: "choice",
-            instructions: "Which option gets the user there most reliably and soonest?",
-            criteria: { bus: "Take the bus", ferry: "Take the ferry", bike_scooter: "Take a bike or scooter" },
-          },
-        },
-      }),
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data?.answers?.best_route ?? null;
-  } catch {
-    return null;
-  }
-}
-
 export async function GET() {
-  const [vehicles, bikesScooters, trafficEvents, jevSample] = await Promise.all([
+  const [vehicles, bikesScooters, trafficEvents] = await Promise.all([
     getLiveVehicles(),
     getLiveBikesScooters(),
     getTrafficEvents(),
-    getJevSample(),
   ]);
   const nodes = [...vehicles, ...bikesScooters, ...trafficEvents, ...getFerryNodes()];
 
@@ -163,6 +149,5 @@ export async function GET() {
       traffic: trafficEvents.length,
     },
     nodes,
-    jevSample,
   });
 }

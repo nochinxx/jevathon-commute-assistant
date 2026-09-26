@@ -299,15 +299,24 @@ function pacificMinutesNow(): number {
   return hour * 60 + minute;
 }
 
-export function getFerrySchedule(terminal: "larkspur" | "sausalito" | "tiburon"): TransportOption {
+/** `walkMinutesToTerminal` -- real (or estimated) time to physically reach
+ * the boarding terminal on foot. A fixed schedule is only actually catchable
+ * if there's enough time left to walk there; without this, "leaves in 4 min"
+ * could describe a terminal that's a 7 min walk away -- a ferry you'd
+ * confidently be told to catch and then miss. Found live during testing. */
+export function getFerrySchedule(
+  terminal: "larkspur" | "sausalito" | "tiburon",
+  walkMinutesToTerminal = 0
+): TransportOption {
   const times = FERRY_SCHEDULE[terminal] ?? [];
   const nowMinutes = pacificMinutesNow();
+  const BUFFER_MIN = 2; // arrive a little before departure, not exactly at it
 
   let etaMinutes: number | null = null;
   for (const t of times) {
     const [h, m] = t.split(":").map(Number);
     const depMinutes = h * 60 + m;
-    if (depMinutes >= nowMinutes) {
+    if (depMinutes >= nowMinutes + walkMinutesToTerminal + BUFFER_MIN) {
       etaMinutes = depMinutes - nowMinutes;
       break;
     }
@@ -315,8 +324,11 @@ export function getFerrySchedule(terminal: "larkspur" | "sausalito" | "tiburon")
   return {
     mode: "ferry",
     etaMinutes,
-    reliability: "fixed schedule, always on time",
-    raw: { terminal, times },
+    reliability:
+      walkMinutesToTerminal > 0
+        ? `fixed schedule, always on time -- allows ~${Math.round(walkMinutesToTerminal)} min to walk to the terminal`
+        : "fixed schedule, always on time",
+    raw: { terminal, times, walkMinutesToTerminal },
     label: `Golden Gate Ferry to ${terminal[0]!.toUpperCase()}${terminal.slice(1)}`,
   };
 }
@@ -374,7 +386,7 @@ export function haversineKm(lat1: number, lng1: number, lat2: number, lng2: numb
 }
 
 const SCOOTER_SPEED_KMH = 15; // typical e-bike/scooter urban speed
-const WALK_SPEED_KMH = 4.8;
+export const WALK_SPEED_KMH = 4.8;
 
 /**
  * Combo option: walk to the nearest available bike/scooter, ride it to a

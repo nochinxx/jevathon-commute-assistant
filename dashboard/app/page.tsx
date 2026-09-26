@@ -10,7 +10,6 @@ type LiveData = {
   fetchedAt: string;
   counts: { bus: number; bikeScooter: number; ferry: number; traffic: number };
   nodes: MapNode[];
-  jevSample: { choice: string; confidence: number; probabilities: Record<string, number> } | null;
 };
 
 const MODE_LABEL: Record<string, string> = {
