@@ -9,6 +9,7 @@ import {
   findNearestStop,
   findNearestTerminal,
   FERRY_TERMINALS,
+  haversineKm,
 } from "./data-sources.js";
 import { decide } from "./jev.js";
 
@@ -151,41 +152,75 @@ for await (const [space, message] of app.messages) {
     `From ${ORIGIN_LABEL} to ${destination.displayName}${deadlineISO ? ` by ${new Date(deadlineISO).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}` : ""} — checking your options...`
   );
 
-  const nearestTerminal = findNearestTerminal(ORIGIN_LAT, ORIGIN_LNG);
+  // The terminal that matters for BOARDING is nearest to the origin; the
+  // terminal that matters for the actual ferry LINE is the one nearest the
+  // DESTINATION (all Golden Gate Ferry boats leave from the SF side -- which
+  // one you take depends on where you're going, not where you're standing).
+  // Using only "nearest to origin" for both was the earlier bug: it always
+  // picked the same terminal regardless of destination, so the ferry choice
+  // had nothing to do with where the user was actually headed.
+  const boardingTerminal = findNearestTerminal(ORIGIN_LAT, ORIGIN_LNG);
+  const arrivalTerminal = findNearestTerminal(destination.lat, destination.lng);
   const nearestStop = await findNearestStop(ORIGIN_LAT, ORIGIN_LNG);
 
-  const terminalCoords = nearestTerminal ? FERRY_TERMINALS[nearestTerminal.terminal] : null;
+  const destDistanceKm = haversineKm(ORIGIN_LAT, ORIGIN_LNG, destination.lat, destination.lng);
+  // A scooter/bike or a single local Muni stop can't realistically cover a
+  // cross-bay trip -- offering them as "100% confidence" options for a
+  // destination like Mill Valley (12+ km, across the Golden Gate) was the
+  // second bug: distance from the origin to the nearest stop/vehicle was
+  // being checked, but never distance to the actual destination.
+  const SCOOTER_MAX_KM = 5;
+  const BUS_MAX_KM = 15;
+  const scooterPlausible = destDistanceKm <= SCOOTER_MAX_KM;
+  const busPlausible = destDistanceKm <= BUS_MAX_KM;
+
+  const ferryRelevant =
+    !!boardingTerminal && !!arrivalTerminal && boardingTerminal.terminal !== arrivalTerminal.terminal;
+  const boardingCoords = boardingTerminal ? FERRY_TERMINALS[boardingTerminal.terminal] : null;
 
   const [bus, bike, ferry, combo] = await Promise.all([
-    nearestStop ? getBusStatus(nearestStop.id) : Promise.resolve(null),
-    getBikeScooterAvailability(ORIGIN_LAT, ORIGIN_LNG),
-    nearestTerminal ? Promise.resolve(getFerrySchedule(nearestTerminal.terminal as any)) : Promise.resolve(null),
-    nearestTerminal && terminalCoords
+    nearestStop && busPlausible ? getBusStatus(nearestStop.id) : Promise.resolve(null),
+    scooterPlausible ? getBikeScooterAvailability(ORIGIN_LAT, ORIGIN_LNG) : Promise.resolve(null),
+    ferryRelevant ? Promise.resolve(getFerrySchedule(arrivalTerminal!.terminal as any)) : Promise.resolve(null),
+    ferryRelevant && boardingCoords
       ? getScooterToFerryCombo(
           ORIGIN_LAT,
           ORIGIN_LNG,
-          nearestTerminal.terminal as any,
-          terminalCoords.lat,
-          terminalCoords.lng
+          arrivalTerminal!.terminal as any,
+          boardingCoords.lat,
+          boardingCoords.lng
         )
       : Promise.resolve(null),
   ]);
 
   const options = [bus, ferry, bike, combo].filter(
-    (o): o is NonNullable<typeof o> => o !== null
+    (o): o is NonNullable<typeof o> => o !== null && o.etaMinutes !== null
   );
 
   // Be transparent about what was and wasn't considered relevant, and why --
-  // this is the "where are you calculating my position" answer, up front.
+  // this is the full decision trace: what was checked, what was excluded and
+  // why, not just the winning answer.
   const relevanceNotes: string[] = [];
-  if (nearestStop) relevanceNotes.push(`nearest bus stop: ${nearestStop.name} (${nearestStop.distanceKm.toFixed(1)}km)`);
-  else relevanceNotes.push("no SF Muni stop close enough to be relevant");
-  if (nearestTerminal) relevanceNotes.push(`nearest ferry terminal: ${nearestTerminal.terminal} (${nearestTerminal.distanceKm.toFixed(1)}km)`);
-  else relevanceNotes.push("no ferry terminal close enough to be relevant");
+  relevanceNotes.push(`destination is ${destDistanceKm.toFixed(1)}km from ${ORIGIN_LABEL}`);
+  if (!busPlausible) relevanceNotes.push(`bus excluded: ${destDistanceKm.toFixed(1)}km is beyond a single local Muni stop's realistic range`);
+  else if (nearestStop) relevanceNotes.push(`nearest bus stop: ${nearestStop.name} (${nearestStop.distanceKm.toFixed(1)}km from origin)`);
+  else relevanceNotes.push("no SF Muni stop close enough to origin to be relevant");
+  if (!scooterPlausible) relevanceNotes.push(`bike/scooter excluded: ${destDistanceKm.toFixed(1)}km is beyond a realistic scooter range (${SCOOTER_MAX_KM}km)`);
+  if (!ferryRelevant) {
+    relevanceNotes.push(
+      !boardingTerminal || !arrivalTerminal
+        ? "no ferry terminal close enough to either end of the trip to be relevant"
+        : "ferry excluded: boarding and arrival terminal are the same (destination isn't across the bay)"
+    );
+  } else {
+    relevanceNotes.push(
+      `ferry: board at ${boardingTerminal!.terminal} (${boardingTerminal!.distanceKm.toFixed(1)}km from origin), line to ${arrivalTerminal!.terminal} (${arrivalTerminal!.distanceKm.toFixed(1)}km from destination)`
+    );
+  }
 
   if (options.length === 0) {
     await space.send(
-      `No viable live options from ${ORIGIN_LABEL} right now (${relevanceNotes.join(", ")}).`
+      `No viable live options from ${ORIGIN_LABEL} to ${destination.displayName} right now (${relevanceNotes.join("; ")}).`
     );
     continue;
   }
@@ -210,6 +245,6 @@ for await (const [space, message] of app.messages) {
     .join(", ");
 
   await space.send(
-    `${narrate(winner, decision.confidence)}\n\n(${probsLine} — ${relevanceNotes.join(", ")})`
+    `${narrate(winner, decision.confidence)}\n\nWhy: ${probsLine}\nConsidered: ${relevanceNotes.join("; ")}`
   );
 }

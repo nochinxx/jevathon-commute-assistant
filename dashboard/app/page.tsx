@@ -32,6 +32,11 @@ type TripResult = {
   destination: { lat: number; lng: number; label: string };
   options: RouteOption[];
   decision: { choice: string; confidence: number; probabilities: Record<string, number> } | null;
+  trace: {
+    destDistanceKm: number;
+    excluded: { mode: string; reason: string }[];
+    jev: { state: string; instructions: string; criteria: Record<string, string> } | null;
+  };
 };
 
 export default function Home() {
@@ -163,6 +168,8 @@ export default function Home() {
           </div>
         )}
 
+        {trip && tripState === "ok" && <DecisionTrace trip={trip} />}
+
         <div className="mt-6 text-xs text-slate-500">
           {data ? `Live data last updated: ${new Date(data.fetchedAt).toLocaleTimeString()}` : "Connecting…"}
         </div>
@@ -176,34 +183,12 @@ export default function Home() {
 
         <MapsComparisonPanel />
 
-        <div className="mt-8">
-          <h2 className="text-sm font-medium text-slate-300 uppercase tracking-wide">Jev decision (ambient sample)</h2>
-          {data?.jevSample ? (
-            <div className="mt-3 rounded-lg border border-slate-800 bg-slate-900 p-4">
-              <div className="text-lg font-semibold">
-                Take the {MODE_LABEL[data.jevSample.choice] ?? data.jevSample.choice}
-              </div>
-              <div className="text-sm text-slate-400 mt-1">
-                Confidence: {(data.jevSample.confidence * 100).toFixed(0)}%
-              </div>
-              <div className="mt-3 space-y-2">
-                {Object.entries(data.jevSample.probabilities).map(([mode, p]) => (
-                  <div key={mode}>
-                    <div className="flex justify-between text-xs text-slate-400 mb-1">
-                      <span>{MODE_LABEL[mode] ?? mode}</span>
-                      <span>{(p * 100).toFixed(0)}%</span>
-                    </div>
-                    <div className="h-1.5 rounded bg-slate-800 overflow-hidden">
-                      <div className="h-full bg-slate-300" style={{ width: `${p * 100}%` }} />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div className="mt-3 text-sm text-slate-500">Waiting for Jev…</div>
-          )}
-        </div>
+        {!trip && (
+          <div className="mt-8 rounded-lg border border-dashed border-slate-800 p-4 text-sm text-slate-500">
+            Submit a destination above to see Jev's real decision trace for that specific trip — which options were
+            considered, which were excluded and why, and the actual probabilities Jev returned.
+          </div>
+        )}
 
         <div className="mt-8 text-xs text-slate-600 leading-relaxed">
           Bus positions: 511.org Vehicle Monitoring (live GPS). Bike/scooter positions: Bay Wheels GBFS
@@ -261,6 +246,64 @@ function MapsComparisonPanel() {
       )}
       {state === "loading" && !comparison && (
         <div className="mt-2 text-sm text-slate-500">Asking Google Maps (Sausalito → Ferry Building)…</div>
+      )}
+    </div>
+  );
+}
+
+function DecisionTrace({ trip }: { trip: TripResult }) {
+  const [showRaw, setShowRaw] = useState(false);
+  return (
+    <div className="mt-8">
+      <h2 className="text-sm font-medium text-slate-300 uppercase tracking-wide">Decision trace</h2>
+      <p className="mt-1 text-xs text-slate-500">
+        Every mode considered for this specific trip ({trip.trace.destDistanceKm.toFixed(1)}km to {trip.destination.label}) — included with real live data, or excluded with the reason why.
+      </p>
+
+      <div className="mt-3 space-y-2">
+        {trip.options.map((o) => {
+          const isChosen = trip.decision?.choice === o.mode;
+          const prob = trip.decision?.probabilities[o.mode];
+          return (
+            <div key={o.mode} className={`rounded px-3 py-2 text-sm ${isChosen ? "bg-emerald-500/10 border border-emerald-500/40" : "bg-slate-900 border border-slate-800"}`}>
+              <div className="flex items-center justify-between">
+                <span className={isChosen ? "font-semibold text-emerald-300" : "text-slate-200"}>
+                  {isChosen ? "✓ " : "considered — "}
+                  {MODE_LABEL[o.mode] ?? o.label}
+                </span>
+                {prob != null && <span className="text-xs text-slate-400">{(prob * 100).toFixed(0)}%</span>}
+              </div>
+              <div className="mt-1 text-xs text-slate-500">
+                {o.etaMinutes} min · {o.reliability}
+              </div>
+            </div>
+          );
+        })}
+        {trip.trace.excluded.map((e) => (
+          <div key={e.mode} className="rounded px-3 py-2 text-sm bg-slate-950 border border-slate-800/60">
+            <div className="text-slate-500">✕ excluded — {MODE_LABEL[e.mode] ?? e.mode}</div>
+            <div className="mt-1 text-xs text-slate-600">{e.reason}</div>
+          </div>
+        ))}
+      </div>
+
+      {trip.trace.jev && (
+        <div className="mt-3">
+          <button
+            onClick={() => setShowRaw((v) => !v)}
+            className="text-xs text-slate-400 hover:text-slate-200 border border-slate-700 rounded px-2 py-1"
+          >
+            {showRaw ? "Hide" : "Show"} what Jev was actually asked
+          </button>
+          {showRaw && (
+            <div className="mt-2 rounded bg-slate-950 border border-slate-800 p-3 text-xs text-slate-400 font-mono whitespace-pre-wrap break-words">
+              <div className="text-slate-500">state:</div>
+              {trip.trace.jev.state}
+              <div className="mt-2 text-slate-500">instructions:</div>
+              {trip.trace.jev.instructions}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

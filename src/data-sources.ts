@@ -10,8 +10,15 @@ type TransportOption = {
 
 const FIVE_ELEVEN_TOKEN = process.env.FIVE_ELEVEN_TOKEN;
 
-/** Fixed ferry terminal locations (verified coordinates). */
+/** Fixed ferry terminal locations (verified coordinates). Includes the SF
+ * side (Ferry Building) as well as Marin -- an earlier version only had the
+ * Marin terminals, which meant a trip starting from the CodeRabbit office
+ * (a 5 min walk from the SF Ferry Building) came back "no ferry close
+ * enough" because the one terminal that actually was close wasn't in this
+ * table at all. Found live when a real Mill Valley trip excluded the ferry
+ * despite it being the most sensible cross-bay option. */
 export const FERRY_TERMINALS: Record<string, { lat: number; lng: number }> = {
+  "sf ferry building": { lat: 37.7955, lng: -122.3937 },
   sausalito: { lat: 37.8419, lng: -122.4785 },
   larkspur: { lat: 37.945, lng: -122.5089 },
   tiburon: { lat: 37.8735, lng: -122.4566 },
@@ -321,7 +328,7 @@ export async function getBikeScooterAvailability(
 
 /** Straight-line distance in km (haversine). Good enough for a rough time
  * estimate over these short urban distances -- not turn-by-turn routing. */
-function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+export function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
   const dLng = ((lng2 - lng1) * Math.PI) / 180;

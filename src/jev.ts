@@ -11,6 +11,13 @@ type Decision = {
   choice: string;
   confidence: number;
   probabilities: Record<string, number>;
+  // Full trace of what Jev was actually given, so "why X over Y" can be
+  // shown for real instead of just the final pick.
+  trace: {
+    state: string;
+    instructions: string;
+    criteria: Record<string, string>;
+  };
 };
 
 const TYPESAFE_API_KEY = process.env.TYPESAFE_API_KEY!;
@@ -39,6 +46,9 @@ export async function decide(
   for (const o of viable) {
     criteria[o.mode.replace(/[^a-zA-Z0-9]/g, "_")] = `Take the ${o.mode}`;
   }
+  const state = stateLines.join(" ");
+  const instructions =
+    "Which option gets the user to their destination most reliably and soonest, given current conditions?";
 
   const res = await fetch(JEV_ENDPOINT, {
     method: "POST",
@@ -47,15 +57,10 @@ export async function decide(
       Authorization: `Bearer ${TYPESAFE_API_KEY}`,
     },
     body: JSON.stringify({
-      state: stateLines.join(" "),
+      state,
       model: "jev-latest",
       questions: {
-        best_route: {
-          type: "choice",
-          instructions:
-            "Which option gets the user to their destination most reliably and soonest, given current conditions?",
-          criteria,
-        },
+        best_route: { type: "choice", instructions, criteria },
       },
     }),
   });
@@ -69,5 +74,6 @@ export async function decide(
     choice: answer.choice,
     confidence: answer.confidence,
     probabilities: answer.probabilities,
+    trace: { state, instructions, criteria },
   };
 }

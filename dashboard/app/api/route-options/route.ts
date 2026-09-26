@@ -139,26 +139,24 @@ async function jevChoice(options: RouteOption[]) {
   const stateLines = viable.map((o) => `${o.mode}: ETA ${o.etaMinutes} min, ${o.reliability}`);
   const criteria: Record<string, string> = {};
   for (const o of viable) criteria[o.mode] = `Take the ${o.label}`;
+  const state = stateLines.join(" ");
+  const instructions = "Which option gets the user to their destination most reliably and soonest?";
 
   try {
     const res = await fetch("https://api.typesafe.ai/v1/systemone", {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${TYPESAFE_API_KEY}` },
       body: JSON.stringify({
-        state: stateLines.join(" "),
+        state,
         model: "jev-latest",
-        questions: {
-          best_route: {
-            type: "choice",
-            instructions: "Which option gets the user to their destination most reliably and soonest?",
-            criteria,
-          },
-        },
+        questions: { best_route: { type: "choice", instructions, criteria } },
       }),
     });
     if (!res.ok) return null;
     const data = await res.json();
-    return data?.answers?.best_route ?? null;
+    const answer = data?.answers?.best_route;
+    if (!answer) return null;
+    return { ...answer, trace: { state, instructions, criteria } };
   } catch {
     return null;
   }
@@ -198,22 +196,48 @@ export async function GET(req: Request) {
     if (bestDist <= 2) nearestStop = { ...best, distanceKm: bestDist };
   }
 
-  // Nearest ferry terminal to the origin.
-  let nearestTerminal: (typeof FERRY_TERMINALS)[number] & { distanceKm: number } = {
-    ...FERRY_TERMINALS[0],
-    distanceKm: Infinity,
-  };
-  for (const t of FERRY_TERMINALS) {
-    const d = haversineKm(originPoint.lat, originPoint.lng, t.lat, t.lng);
-    if (d < nearestTerminal.distanceKm) nearestTerminal = { ...t, distanceKm: d };
+  // Boarding terminal = nearest to the ORIGIN (where you'd get on a boat).
+  // Arrival terminal = nearest to the DESTINATION (which line actually gets
+  // you there -- all boats leave from the SF side, so the destination is
+  // what determines which terminal matters, not the origin). Using only
+  // "nearest to origin" for both meant the ferry choice never actually
+  // depended on where the user said they were going.
+  function nearestTerminalTo(lat: number, lng: number) {
+    let best: (typeof FERRY_TERMINALS)[number] & { distanceKm: number } = { ...FERRY_TERMINALS[0], distanceKm: Infinity };
+    for (const t of FERRY_TERMINALS) {
+      const d = haversineKm(lat, lng, t.lat, t.lng);
+      if (d < best.distanceKm) best = { ...t, distanceKm: d };
+    }
+    return best;
   }
-  const terminalInRange = nearestTerminal.distanceKm <= 8;
+  const boardingTerminal = nearestTerminalTo(originPoint.lat, originPoint.lng);
+  const arrivalTerminal = nearestTerminalTo(destination.lat, destination.lng);
+  const ferryRelevant =
+    boardingTerminal.distanceKm <= 8 &&
+    arrivalTerminal.distanceKm <= 8 &&
+    boardingTerminal.name !== arrivalTerminal.name &&
+    arrivalTerminal.name !== "sf_ferry_building"; // no published schedule for the SF-side leg itself
 
-  const bikes = await getNearbyBikes(originPoint.lat, originPoint.lng);
+  const destDistanceKm = haversineKm(originPoint.lat, originPoint.lng, destination.lat, destination.lng);
+  // A scooter or a single local Muni stop can't realistically cover a
+  // cross-bay trip -- checking distance to the nearest vehicle/stop but never
+  // to the actual destination was the bug that let e.g. a 12km Mill Valley
+  // trip come back "100% confidence" on a scooter.
+  const SCOOTER_MAX_KM = 5;
+  const BUS_MAX_KM = 15;
+  const busPlausible = destDistanceKm <= BUS_MAX_KM;
+  const scooterPlausible = destDistanceKm <= SCOOTER_MAX_KM;
+
+  const bikes = scooterPlausible ? await getNearbyBikes(originPoint.lat, originPoint.lng) : { count: 0, nearest: null as any };
 
   const options: RouteOption[] = [];
+  const excluded: { mode: string; reason: string }[] = [];
 
-  if (nearestStop) {
+  if (!busPlausible) {
+    excluded.push({ mode: "bus", reason: `destination is ${destDistanceKm.toFixed(1)}km away, beyond a single local Muni stop's realistic range (${BUS_MAX_KM}km)` });
+  } else if (!nearestStop) {
+    excluded.push({ mode: "bus", reason: "no SF Muni stop close enough to the origin to be relevant" });
+  } else {
     const bus = await getBusEta(nearestStop.id);
     const busLabel = bus.lineName ? `Muni ${bus.lineName} (${nearestStop.name})` : `Bus (${nearestStop.name})`;
     options.push({
@@ -229,11 +253,26 @@ export async function GET(req: Request) {
     });
   }
 
-  if (terminalInRange) {
-    // Fixed weekend ferry schedule (Sausalito) reused as a rough same-day estimate.
+  if (!ferryRelevant) {
+    excluded.push({
+      mode: "ferry",
+      reason:
+        boardingTerminal.distanceKm > 8 || arrivalTerminal.distanceKm > 8
+          ? "no ferry terminal close enough to either end of the trip to be relevant"
+          : "boarding and arrival terminal are the same -- destination isn't across the bay",
+    });
+  } else {
+    // Fixed Golden Gate Ferry schedule for the ARRIVAL-side line (the boat
+    // that actually goes toward the destination), used as a same-day
+    // approximation -- ferries run a locked schedule, they're not late.
+    const SCHEDULES: Record<string, number[]> = {
+      sausalito: [10 * 60 + 15, 13 * 60 + 55, 15 * 60 + 40, 17 * 60 + 30],
+      larkspur: [9 * 60, 10 * 60, 10 * 60 + 45, 11 * 60 + 30, 12 * 60 + 15, 13 * 60 + 30, 14 * 60 + 15, 15 * 60, 15 * 60 + 45, 16 * 60 + 30, 17 * 60 + 15, 18 * 60, 18 * 60 + 45],
+      tiburon: [11 * 60 + 50, 12 * 60 + 55, 14 * 60 + 45, 17 * 60 + 10],
+    };
     const now = new Date();
     const nowMin = now.getHours() * 60 + now.getMinutes();
-    const schedule = [10 * 60 + 15, 13 * 60 + 55, 15 * 60 + 40, 17 * 60 + 30]; // 10:15, 13:55, 15:40, 17:30
+    const schedule = SCHEDULES[arrivalTerminal.name] ?? [];
     let ferryEta: number | null = null;
     for (const t of schedule) {
       if (t >= nowMin) {
@@ -241,26 +280,34 @@ export async function GET(req: Request) {
         break;
       }
     }
-    options.push({
-      mode: "ferry",
-      label: `Ferry (${nearestTerminal.label})`,
-      etaMinutes: ferryEta,
-      reliability: "fixed schedule, always on time",
-      path: [
-        [originPoint.lat, originPoint.lng],
-        [nearestTerminal.lat, nearestTerminal.lng],
-        [destination.lat, destination.lng],
-      ],
-    });
+    if (ferryEta === null) {
+      excluded.push({ mode: "ferry", reason: `no more ${arrivalTerminal.label} departures today` });
+    } else {
+      options.push({
+        mode: "ferry",
+        label: `Ferry to ${arrivalTerminal.label} (board at ${boardingTerminal.label})`,
+        etaMinutes: ferryEta,
+        reliability: "fixed schedule, always on time",
+        path: [
+          [originPoint.lat, originPoint.lng],
+          [boardingTerminal.lat, boardingTerminal.lng],
+          [arrivalTerminal.lat, arrivalTerminal.lng],
+          [destination.lat, destination.lng],
+        ],
+      });
+    }
   }
 
-  if (bikes.nearest) {
-    const distKm = haversineKm(originPoint.lat, originPoint.lng, destination.lat, destination.lng);
-    const rideMin = Math.round((distKm / 15) * 60) + 2; // ~15km/h + walk-to-vehicle buffer
+  if (!scooterPlausible) {
+    excluded.push({ mode: "bike_scooter", reason: `destination is ${destDistanceKm.toFixed(1)}km away, beyond a realistic scooter range (${SCOOTER_MAX_KM}km)` });
+  } else if (!bikes.nearest) {
+    excluded.push({ mode: "bike_scooter", reason: "no Bay Wheels vehicle nearby right now" });
+  } else {
+    const rideMin = Math.round((destDistanceKm / 15) * 60) + 2; // ~15km/h + walk-to-vehicle buffer
     options.push({
       mode: "bike_scooter",
       label: bikes.nearest.vehicleLabel,
-      etaMinutes: distKm <= 6 ? rideMin : null,
+      etaMinutes: rideMin,
       reliability: `${bikes.count} Bay Wheels vehicles available nearby`,
       path: [
         [originPoint.lat, originPoint.lng],
@@ -277,5 +324,10 @@ export async function GET(req: Request) {
     destination: { lat: destination.lat, lng: destination.lng, label: destination.displayName },
     options,
     decision,
+    trace: {
+      destDistanceKm,
+      excluded,
+      jev: decision?.trace ?? null,
+    },
   });
 }
