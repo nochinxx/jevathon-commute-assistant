@@ -9,11 +9,13 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@browserbasehq/stagehand": "^4.1.0",
     "leaflet": "^1.9.4",
     "next": "16.3.6",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "react-leaflet": "^5.0.0"
+    "react-leaflet": "^5.0.0",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

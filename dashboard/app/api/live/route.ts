@@ -7,7 +7,7 @@ const TYPESAFE_API_KEY = process.env.TYPESAFE_API_KEY!;
 
 type MapNode = {
   id: string;
-  mode: "bus" | "bike-scooter" | "ferry";
+  mode: "bus" | "bike-scooter" | "ferry" | "traffic";
   lat: number;
   lng: number;
   label: string;
@@ -74,6 +74,36 @@ async function getLiveBikesScooters(): Promise<MapNode[]> {
   }
 }
 
+async function getTrafficEvents(): Promise<MapNode[]> {
+  try {
+    const res = await fetch(
+      `http://api.511.org/traffic/events?api_key=${FIVE_ELEVEN_TOKEN}&format=json`,
+      { headers: { "Accept-Encoding": "gzip" } }
+    );
+    if (!res.ok) return [];
+    const buf = await res.arrayBuffer();
+    const text = new TextDecoder("utf-8").decode(buf).replace(/^﻿/, "");
+    const data = JSON.parse(text);
+    const events: any[] = data?.events ?? [];
+    return events
+      .filter((e) => e.status === "ACTIVE" && Array.isArray(e.geography?.coordinates))
+      .slice(0, 30)
+      .map((e) => {
+        const [lng, lat] = e.geography.coordinates;
+        const headline: string = e.headline ?? e.event_type ?? "Traffic event";
+        return {
+          id: `traffic-${e.id}`,
+          mode: "traffic" as const,
+          lat,
+          lng,
+          label: headline.length > 140 ? headline.slice(0, 140) + "…" : headline,
+        };
+      });
+  } catch {
+    return [];
+  }
+}
+
 function getFerryNodes(): MapNode[] {
   return FERRY_TERMINALS.map((t) => ({
     id: t.id,
@@ -114,16 +144,22 @@ async function getJevSample() {
 }
 
 export async function GET() {
-  const [vehicles, bikesScooters, jevSample] = await Promise.all([
+  const [vehicles, bikesScooters, trafficEvents, jevSample] = await Promise.all([
     getLiveVehicles(),
     getLiveBikesScooters(),
+    getTrafficEvents(),
     getJevSample(),
   ]);
-  const nodes = [...vehicles, ...bikesScooters, ...getFerryNodes()];
+  const nodes = [...vehicles, ...bikesScooters, ...trafficEvents, ...getFerryNodes()];
 
   return NextResponse.json({
     fetchedAt: new Date().toISOString(),
-    counts: { bus: vehicles.length, bikeScooter: bikesScooters.length, ferry: FERRY_TERMINALS.length },
+    counts: {
+      bus: vehicles.length,
+      bikeScooter: bikesScooters.length,
+      ferry: FERRY_TERMINALS.length,
+      traffic: trafficEvents.length,
+    },
     nodes,
     jevSample,
   });

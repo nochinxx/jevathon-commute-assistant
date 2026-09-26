@@ -8,7 +8,7 @@ const MapView = dynamic(() => import("./components/MapView"), { ssr: false });
 
 type LiveData = {
   fetchedAt: string;
-  counts: { bus: number; bikeScooter: number; ferry: number };
+  counts: { bus: number; bikeScooter: number; ferry: number; traffic: number };
   nodes: MapNode[];
   jevSample: { choice: string; confidence: number; probabilities: Record<string, number> } | null;
 };
@@ -67,11 +67,14 @@ export default function Home() {
           {data ? `Last updated: ${new Date(data.fetchedAt).toLocaleTimeString()}` : "Connecting…"}
         </div>
 
-        <div className="mt-4 grid grid-cols-3 gap-2">
+        <div className="mt-4 grid grid-cols-2 gap-2">
           <StatTile label="Buses" value={data?.counts.bus} color="#2563eb" />
           <StatTile label="Bikes/Scooters" value={data?.counts.bikeScooter} color="#16a34a" />
           <StatTile label="Ferry terminals" value={data?.counts.ferry} color="#ea580c" />
+          <StatTile label="Traffic events" value={data?.counts.traffic} color="#dc2626" />
         </div>
+
+        <MapsComparisonPanel />
 
         <div className="mt-8">
           <h2 className="text-sm font-medium text-slate-300 uppercase tracking-wide">
@@ -113,6 +116,61 @@ export default function Home() {
           schedule. All data sources are independently verifiable at their public endpoints.
         </div>
       </aside>
+    </div>
+  );
+}
+
+type MapsComparison = { recommendedMode: string; etaMinutes: number | null; raw: string };
+
+function MapsComparisonPanel() {
+  const [state, setState] = useState<"idle" | "loading" | "ok" | "error">("idle");
+  const [comparison, setComparison] = useState<MapsComparison | null>(null);
+
+  async function fetchComparison() {
+    setState("loading");
+    try {
+      const res = await fetch("/api/maps-comparison", { cache: "no-store" });
+      if (!res.ok) throw new Error("bad response");
+      const json = await res.json();
+      if (!json || json.error) throw new Error("no data");
+      setComparison(json);
+      setState("ok");
+    } catch {
+      setState("error");
+    }
+  }
+
+  useEffect(() => {
+    fetchComparison();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div className="mt-6 rounded-lg border border-slate-800 bg-slate-900 p-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-medium text-slate-300 uppercase tracking-wide">
+          vs. Google Maps
+        </h2>
+        <button
+          onClick={fetchComparison}
+          className="text-xs text-slate-400 hover:text-slate-200 border border-slate-700 rounded px-2 py-1"
+          disabled={state === "loading"}
+        >
+          {state === "loading" ? "Checking…" : "Refresh"}
+        </button>
+      </div>
+      {state === "error" && (
+        <div className="mt-2 text-sm text-slate-500">Comparison unavailable right now.</div>
+      )}
+      {state === "ok" && comparison && (
+        <div className="mt-2 text-sm text-slate-300">
+          Maps says: <span className="font-semibold">{comparison.recommendedMode}</span>
+          {comparison.etaMinutes != null && <> — {comparison.etaMinutes} min</>}
+        </div>
+      )}
+      {state === "loading" && !comparison && (
+        <div className="mt-2 text-sm text-slate-500">Asking Google Maps (Sausalito → Ferry Building)…</div>
+      )}
     </div>
   );
 }
