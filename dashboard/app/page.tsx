@@ -39,6 +39,15 @@ type TripResult = {
   };
 };
 
+type LoggedTrip = {
+  receivedAt: string;
+  source: "imessage" | "dashboard";
+  destination: { label: string };
+  goal?: string;
+  decision: { choice: string; confidence: number } | null;
+  relevanceNotes?: string[];
+};
+
 export default function Home() {
   const [data, setData] = useState<LiveData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -47,6 +56,27 @@ export default function Home() {
   const [trip, setTrip] = useState<TripResult | null>(null);
   const [tripState, setTripState] = useState<"idle" | "loading" | "ok" | "error">("idle");
   const [tripError, setTripError] = useState<string | null>(null);
+
+  const [loggedTrips, setLoggedTrips] = useState<LoggedTrip[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function poll() {
+      try {
+        const res = await fetch("/api/trip-log", { cache: "no-store" });
+        const json = await res.json();
+        if (!cancelled) setLoggedTrips(json.trips ?? []);
+      } catch {
+        // keep last good list on transient failure
+      }
+    }
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -169,6 +199,37 @@ export default function Home() {
         )}
 
         {trip && tripState === "ok" && <DecisionTrace trip={trip} />}
+
+        <div className="mt-8">
+          <h2 className="text-sm font-medium text-slate-300 uppercase tracking-wide">Recent requests (live)</h2>
+          <p className="mt-1 text-xs text-slate-500">Every trip decided over iMessage or here, as it happens.</p>
+          {loggedTrips.length === 0 ? (
+            <div className="mt-3 text-sm text-slate-500">No requests yet — text the number or submit a destination above.</div>
+          ) : (
+            <div className="mt-3 space-y-2">
+              {loggedTrips.map((t, i) => (
+                <div key={i} className="rounded-lg border border-slate-800 bg-slate-900 p-3 text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-200">{t.destination.label.split(",")[0]}</span>
+                    <span className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${t.source === "imessage" ? "bg-blue-500/20 text-blue-300" : "bg-emerald-500/20 text-emerald-300"}`}>
+                      {t.source}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-xs text-slate-400">
+                    {t.decision ? (
+                      <>
+                        Chose <span className="text-slate-300">{MODE_LABEL[t.decision.choice] ?? t.decision.choice}</span> ({(t.decision.confidence * 100).toFixed(0)}%)
+                      </>
+                    ) : (
+                      "no viable option"
+                    )}
+                  </div>
+                  <div className="mt-1 text-[11px] text-slate-600">{new Date(t.receivedAt).toLocaleTimeString()}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
 
         <div className="mt-6 text-xs text-slate-500">
           {data ? `Live data last updated: ${new Date(data.fetchedAt).toLocaleTimeString()}` : "Connecting…"}

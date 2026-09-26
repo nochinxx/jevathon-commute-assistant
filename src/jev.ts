@@ -5,6 +5,7 @@ type TransportOption = {
   etaMinutes: number | null;
   reliability: string;
   raw: unknown;
+  label?: string;
 };
 
 type Decision = {
@@ -31,7 +32,7 @@ export async function decide(
   if (viable.length === 0) return null;
 
   const stateLines = viable.map(
-    (o) => `${o.mode}: ETA ${o.etaMinutes} min, reliability: ${o.reliability}`
+    (o) => `${o.label ?? o.mode}: ETA ${o.etaMinutes} min, reliability: ${o.reliability}`
   );
   if (nextCommitment) {
     const deadlinePart = nextCommitment.whenISO
@@ -44,7 +45,7 @@ export async function decide(
 
   const criteria: Record<string, string> = {};
   for (const o of viable) {
-    criteria[o.mode.replace(/[^a-zA-Z0-9]/g, "_")] = `Take the ${o.mode}`;
+    criteria[o.mode.replace(/[^a-zA-Z0-9]/g, "_")] = `Take the ${o.label ?? o.mode}`;
   }
   const state = stateLines.join(" ");
   const instructions =

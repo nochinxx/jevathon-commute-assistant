@@ -18,6 +18,7 @@ type TransportOption = {
   etaMinutes: number | null;
   reliability: string;
   raw: unknown;
+  label?: string;
 };
 
 /** Turn the winning option into a natural, friend-texting-you sentence
@@ -26,6 +27,19 @@ type TransportOption = {
  * mode name. */
 function cap(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// Terminal keys are lowercase lookup strings ("sf ferry building"); cap()
+// alone only capitalizes the first letter, which reads oddly for a
+// multi-word name -- use the proper display name for ones we know.
+const TERMINAL_LABEL: Record<string, string> = {
+  "sf ferry building": "SF Ferry Building",
+  sausalito: "Sausalito",
+  larkspur: "Larkspur",
+  tiburon: "Tiburon",
+};
+function terminalLabel(terminal: string): string {
+  return TERMINAL_LABEL[terminal] ?? cap(terminal);
 }
 
 // Fixed starting point for this demo: the CodeRabbit office (201 Spear St,
@@ -79,20 +93,38 @@ function narrate(option: TransportOption | undefined, confidence: number): strin
   const pct = (confidence * 100).toFixed(0);
 
   if (option.mode === "bus") {
-    return `Hop on the bus -- it's about ${option.etaMinutes} min out and ${option.reliability}. You'd arrive around ${clockTime(option.etaMinutes)} (${pct}% confidence this is your best bet).`;
+    return `Take the ${option.label ?? "bus"} -- it's about ${option.etaMinutes} min out and ${option.reliability}. You'd arrive around ${clockTime(option.etaMinutes)} (${pct}% confidence this is your best bet).`;
   }
   if (option.mode === "ferry") {
-    const terminal = cap((option.raw as any)?.terminal ?? "the terminal");
-    return `Catch the ${terminal} ferry -- it leaves in ${option.etaMinutes} min, ${option.reliability}. Departure around ${clockTime(option.etaMinutes)} (${pct}% confidence).`;
+    return `${option.label ?? "Catch the ferry"} -- it leaves in ${option.etaMinutes} min, ${option.reliability}. Departure around ${clockTime(option.etaMinutes)} (${pct}% confidence).`;
   }
   if (option.mode === "bike/scooter") {
-    return `Grab a bike or scooter -- ${option.reliability}, about a ${option.etaMinutes} min walk to reach one, so you'd be moving by around ${clockTime(option.etaMinutes)} (${pct}% confidence).`;
+    return `Grab a ${option.label ?? "bike or scooter"} -- ${option.reliability}, about a ${option.etaMinutes} min walk to reach one, so you'd be moving by around ${clockTime(option.etaMinutes)} (${pct}% confidence).`;
   }
   if (option.mode.startsWith("scooter->")) {
-    const terminal = cap(option.mode.replace("scooter->", "").replace(" ferry", ""));
-    return `Grab a scooter and head to the ${terminal} terminal -- ${option.reliability}. Ferry departs around ${clockTime(option.etaMinutes)} (${pct}% confidence).`;
+    return `${option.label ?? "Grab a scooter and head to the ferry terminal"} -- ${option.reliability}. Ferry departs around ${clockTime(option.etaMinutes)} (${pct}% confidence).`;
   }
   return `Take the ${option.mode.replace(/_/g, " ")} -- ${option.reliability}, around ${clockTime(option.etaMinutes)} (${pct}% confidence).`;
+}
+
+const DASHBOARD_URL = process.env.DASHBOARD_URL ?? "https://jevathon-commute-assistant.vercel.app";
+const TRIP_LOG_SECRET = process.env.TRIP_LOG_SECRET;
+
+/** Publish each decision to the dashboard so a trip requested over iMessage
+ * shows up there too -- the two surfaces used to be completely disconnected
+ * (the dashboard had no idea iMessage traffic existed at all). Best-effort:
+ * never let a slow/failed network call delay or break the iMessage reply. */
+async function logTripToDashboard(payload: unknown): Promise<void> {
+  if (!TRIP_LOG_SECRET) return;
+  try {
+    await fetch(`${DASHBOARD_URL}/api/trip-log`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ secret: TRIP_LOG_SECRET, ...(payload as object) }),
+    });
+  } catch {
+    // dashboard being down is not the user's problem
+  }
 }
 
 // Spectrum bridges a single agent loop to many messaging interfaces.
@@ -179,7 +211,7 @@ for await (const [space, message] of app.messages) {
   const boardingCoords = boardingTerminal ? FERRY_TERMINALS[boardingTerminal.terminal] : null;
 
   const [bus, bike, ferry, combo] = await Promise.all([
-    nearestStop && busPlausible ? getBusStatus(nearestStop.id) : Promise.resolve(null),
+    nearestStop && busPlausible ? getBusStatus(nearestStop.id, nearestStop.name) : Promise.resolve(null),
     scooterPlausible ? getBikeScooterAvailability(ORIGIN_LAT, ORIGIN_LNG) : Promise.resolve(null),
     ferryRelevant ? Promise.resolve(getFerrySchedule(arrivalTerminal!.terminal as any)) : Promise.resolve(null),
     ferryRelevant && boardingCoords
@@ -192,6 +224,12 @@ for await (const [space, message] of app.messages) {
         )
       : Promise.resolve(null),
   ]);
+
+  // Ferry/combo labels only know the arrival terminal on their own -- fill
+  // in the boarding side here, where both are actually known, so the reply
+  // says exactly where to get on, not just where the boat is headed.
+  if (ferry) ferry.label = `Ferry to ${terminalLabel(arrivalTerminal!.terminal)} (board at ${terminalLabel(boardingTerminal!.terminal)})`;
+  if (combo) combo.label = `${combo.label?.split(" to the ")[0]} to ${terminalLabel(boardingTerminal!.terminal)}, then the ferry to ${terminalLabel(arrivalTerminal!.terminal)}`;
 
   const options = [bus, ferry, bike, combo].filter(
     (o): o is NonNullable<typeof o> => o !== null && o.etaMinutes !== null
@@ -214,13 +252,13 @@ for await (const [space, message] of app.messages) {
     );
   } else {
     relevanceNotes.push(
-      `ferry: board at ${boardingTerminal!.terminal} (${boardingTerminal!.distanceKm.toFixed(1)}km from origin), line to ${arrivalTerminal!.terminal} (${arrivalTerminal!.distanceKm.toFixed(1)}km from destination)`
+      `ferry: board at ${terminalLabel(boardingTerminal!.terminal)} (${boardingTerminal!.distanceKm.toFixed(1)}km from origin), line to ${terminalLabel(arrivalTerminal!.terminal)} (${arrivalTerminal!.distanceKm.toFixed(1)}km from destination)`
     );
   }
 
   if (options.length === 0) {
     await space.send(
-      `No viable live options from ${ORIGIN_LABEL} to ${destination.displayName} right now (${relevanceNotes.join("; ")}).`
+      `No viable live options from ${ORIGIN_LABEL} to ${destination.displayName} right now.\n\n${relevanceNotes.map((n) => `• ${n}`).join("\n")}`
     );
     continue;
   }
@@ -240,11 +278,23 @@ for await (const [space, message] of app.messages) {
   }
 
   const winner = options.find((o) => o.mode.replace(/[^a-zA-Z0-9]/g, "_") === decision.choice);
-  const probsLine = Object.entries(decision.probabilities)
-    .map(([k, v]) => `${k.replace(/_/g, " ")}: ${(v * 100).toFixed(0)}%`)
-    .join(", ");
+  const probsBlock = Object.entries(decision.probabilities)
+    .map(([k, v]) => `• ${k.replace(/_/g, " ")}: ${(v * 100).toFixed(0)}%`)
+    .join("\n");
+  const notesBlock = relevanceNotes.map((n) => `• ${n}`).join("\n");
 
   await space.send(
-    `${narrate(winner, decision.confidence)}\n\nWhy: ${probsLine}\nConsidered: ${relevanceNotes.join("; ")}`
+    `${narrate(winner, decision.confidence)}\n\nWhy:\n${probsBlock}\n\nConsidered:\n${notesBlock}`
   );
+
+  void logTripToDashboard({
+    source: "imessage",
+    origin: { lat: ORIGIN_LAT, lng: ORIGIN_LNG, label: ORIGIN_LABEL },
+    destination: { lat: destination.lat, lng: destination.lng, label: destination.displayName },
+    goal,
+    deadlineISO,
+    options,
+    decision,
+    relevanceNotes,
+  });
 }

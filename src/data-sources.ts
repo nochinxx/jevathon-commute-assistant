@@ -6,6 +6,7 @@ type TransportOption = {
   etaMinutes: number | null;
   reliability: string; // short human description
   raw: unknown;
+  label?: string; // human-readable specifics (stop name, line, vehicle type) -- not just the mode
 };
 
 const FIVE_ELEVEN_TOKEN = process.env.FIVE_ELEVEN_TOKEN;
@@ -226,8 +227,15 @@ export function findNearestTerminal(
   return best;
 }
 
-/** Live bus/Muni status via 511.org Stop Monitoring API. */
-export async function getBusStatus(stopId: string, agency = "SF"): Promise<TransportOption | null> {
+/** Live bus/Muni status via 511.org Stop Monitoring API. `stopName` is passed
+ * in purely for the human-readable label -- without naming the actual stop
+ * and line, "hop on the bus" isn't verifiable/actionable data, just a mode
+ * name. */
+export async function getBusStatus(
+  stopId: string,
+  stopName: string,
+  agency = "SF"
+): Promise<TransportOption | null> {
   if (!FIVE_ELEVEN_TOKEN) return null;
   try {
     const url = `http://api.511.org/transit/StopMonitoring?api_key=${FIVE_ELEVEN_TOKEN}&agency=${agency}&stopcode=${stopId}&format=json`;
@@ -238,9 +246,11 @@ export async function getBusStatus(stopId: string, agency = "SF"): Promise<Trans
     const data = JSON.parse(text);
     const visits =
       data?.ServiceDelivery?.StopMonitoringDelivery?.MonitoredStopVisit ?? [];
-    if (!visits.length) return { mode: "bus", etaMinutes: null, reliability: "no live data", raw: data };
+    if (!visits.length) return { mode: "bus", etaMinutes: null, reliability: "no live data", raw: data, label: `Bus (${stopName})` };
 
     const next = visits[0].MonitoredVehicleJourney;
+    const lineName: string | null = next?.PublishedLineName ?? next?.LineRef ?? null;
+    const label = lineName ? `Muni ${lineName} (${stopName})` : `Bus (${stopName})`;
     const expected = next?.MonitoredCall?.ExpectedArrivalTime;
     const aimed = next?.MonitoredCall?.AimedArrivalTime;
     let etaMinutes: number | null = null;
@@ -255,7 +265,7 @@ export async function getBusStatus(stopId: string, agency = "SF"): Promise<Trans
         else if (delayMin < -1) reliability = `running ${Math.abs(delayMin)} min early`;
       }
     }
-    return { mode: "bus", etaMinutes, reliability, raw: next };
+    return { mode: "bus", etaMinutes, reliability, raw: next, label };
   } catch {
     return null;
   }
@@ -307,6 +317,7 @@ export function getFerrySchedule(terminal: "larkspur" | "sausalito" | "tiburon")
     etaMinutes,
     reliability: "fixed schedule, always on time",
     raw: { terminal, times },
+    label: `Golden Gate Ferry to ${terminal[0]!.toUpperCase()}${terminal.slice(1)}`,
   };
 }
 
@@ -330,12 +341,20 @@ export async function getBikeScooterAvailability(
       const distKm = Math.sqrt(dLat ** 2 + dLng ** 2) * 111;
       return distKm <= radiusKm;
     });
+    // Bay Wheels is Lyft's Bay Area bike-share brand -- name it and the
+    // vehicle type, not a bare generic "bike or scooter".
+    const vehicleLabel = nearby[0]
+      ? nearby[0].type === "electric_bike"
+        ? "Bay Wheels e-bike"
+        : "Bay Wheels classic bike"
+      : "bike/scooter";
 
     return {
       mode: "bike/scooter",
       etaMinutes: nearby.length > 0 ? 2 : null, // walk-to-vehicle estimate
       reliability: `${nearby.length} available within ${radiusKm}km`,
       raw: nearby.slice(0, 5),
+      label: vehicleLabel,
     };
   } catch {
     return null;
@@ -402,11 +421,13 @@ export async function getScooterToFerryCombo(
     // Only a real combo if you'd actually make the ferry with a little buffer.
     if (arriveAtTerminalMin > ferry.etaMinutes - 3) return null;
 
+    const vehicleLabel = nearest.type === "electric_bike" ? "Bay Wheels e-bike" : "Bay Wheels classic bike";
     return {
       mode: `scooter->${terminal} ferry`,
       etaMinutes: ferry.etaMinutes,
       reliability: `${Math.round(walkToVehicleMin)} min walk + ${Math.round(rideMin)} min ride to catch a fixed-schedule ferry`,
       raw: { nearest, rideDistKm, ferry },
+      label: `${vehicleLabel} to the ${ferry.label}`,
     };
   } catch {
     return null;
