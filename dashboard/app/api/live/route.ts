@@ -68,7 +68,7 @@ async function getLiveBikesScooters(): Promise<MapNode[]> {
         mode: "bike-scooter" as const,
         lat: b.lat,
         lng: b.lon,
-        label: b.type === "electric_bike" ? "E-bike" : "Bike/scooter",
+        label: b.type === "electric_bike" ? "Bay Wheels e-bike" : "Bay Wheels classic bike",
       }));
   } catch {
     return [];
