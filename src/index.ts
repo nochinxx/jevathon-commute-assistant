@@ -5,8 +5,48 @@ import {
   getFerrySchedule,
   getBikeScooterAvailability,
   getScooterToFerryCombo,
+  resolveLocation,
+  findNearestStop,
+  findNearestTerminal,
+  FERRY_TERMINALS,
 } from "./data-sources.js";
 import { decide } from "./jev.js";
+
+type TransportOption = {
+  mode: string;
+  etaMinutes: number | null;
+  reliability: string;
+  raw: unknown;
+};
+
+/** Turn the winning option into a natural, friend-texting-you sentence
+ * instead of a raw mode label -- uses the real computed numbers already
+ * on the option (eta, reliability text), not a template restating the
+ * mode name. */
+function cap(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function narrate(option: TransportOption | undefined, confidence: number): string {
+  if (!option) return "Couldn't match Jev's pick back to a specific option -- try again.";
+  const pct = (confidence * 100).toFixed(0);
+
+  if (option.mode === "bus") {
+    return `Hop on the bus -- it's about ${option.etaMinutes} min out and ${option.reliability} (${pct}% confidence this is your best bet).`;
+  }
+  if (option.mode === "ferry") {
+    const terminal = cap((option.raw as any)?.terminal ?? "the terminal");
+    return `Catch the ${terminal} ferry -- it leaves in ${option.etaMinutes} min, ${option.reliability} (${pct}% confidence).`;
+  }
+  if (option.mode === "bike/scooter") {
+    return `Grab a bike or scooter -- ${option.reliability}, about a ${option.etaMinutes} min walk to reach one (${pct}% confidence).`;
+  }
+  if (option.mode.startsWith("scooter->")) {
+    const terminal = cap(option.mode.replace("scooter->", "").replace(" ferry", ""));
+    return `Grab a scooter and head to the ${terminal} terminal -- ${option.reliability}. Ferry departs in ${option.etaMinutes} min (${pct}% confidence).`;
+  }
+  return `Take the ${option.mode.replace(/_/g, " ")} -- ${option.reliability} (${pct}% confidence).`;
+}
 
 // Spectrum bridges a single agent loop to many messaging interfaces.
 // Docs: https://photon.codes/docs/spectrum-ts
@@ -16,25 +56,14 @@ const app = await Spectrum({
   providers: [imessage.config()],
 });
 
-// No GPS/location-share integration in this build (out of scope for the time
-// we have) -- location and destination/goal come from what the user actually
-// types, not from hardcoded values or device geolocation. This is honest
-// about the limitation while still being real, not fabricated: the agent
-// reasons over your literal message text instead of ignoring it.
-const DEMO_STOP_ID = "13915"; // Muni stop, Market St corridor -- fallback bus stop
-const DEMO_LAT = 37.7936;
-const DEMO_LNG = -122.396; // fallback location near the Ferry Building, used if the
-// user doesn't ask about a specific area
-
 const trackedGoals = new Map<string, string>(); // spaceId -> last stated goal, per conversation
 
 for await (const [space, message] of app.messages) {
   if (message.content.type !== "text") continue;
   const text = message.content.text.trim();
 
-  // Treat a message containing "by" + a time, or the word "heading"/"going to",
-  // as the user stating (or restating) their goal for this conversation.
-  const looksLikeGoal = /\b(by|heading|going to|need to be)\b/i.test(text);
+  const wordCount = text.split(/\s+/).filter(Boolean).length;
+  const looksLikeGoal = wordCount >= 3;
   if (looksLikeGoal) {
     trackedGoals.set(space.id, text);
   }
@@ -47,31 +76,62 @@ for await (const [space, message] of app.messages) {
     continue;
   }
 
-  await space.send("Checking your options...");
+  // Real geocoding from what the user actually said -- no hardcoded/demo
+  // location. If nothing in the message resolves to a real place, say so
+  // honestly instead of silently falling back to a fabricated location.
+  const location = await resolveLocation(goal);
+  if (!location) {
+    await space.send(
+      `Couldn't figure out a specific place from that. Try naming a city or neighborhood (e.g. "Sausalito" or "Mill Valley").`
+    );
+    continue;
+  }
 
-  const SAUSALITO_LAT = 37.8419;
-  const SAUSALITO_LNG = -122.4785;
+  await space.send(`Based on: ${location.displayName} — checking your options...`);
 
-  const [bus, bike, combo] = await Promise.all([
-    getBusStatus(DEMO_STOP_ID),
-    getBikeScooterAvailability(DEMO_LAT, DEMO_LNG),
-    getScooterToFerryCombo(DEMO_LAT, DEMO_LNG, "sausalito", SAUSALITO_LAT, SAUSALITO_LNG),
+  const nearestTerminal = findNearestTerminal(location.lat, location.lng);
+  const nearestStop = await findNearestStop(location.lat, location.lng);
+
+  const terminalCoords = nearestTerminal ? FERRY_TERMINALS[nearestTerminal.terminal] : null;
+
+  const [bus, bike, ferry, combo] = await Promise.all([
+    nearestStop ? getBusStatus(nearestStop.id) : Promise.resolve(null),
+    getBikeScooterAvailability(location.lat, location.lng),
+    nearestTerminal ? Promise.resolve(getFerrySchedule(nearestTerminal.terminal as any)) : Promise.resolve(null),
+    nearestTerminal && terminalCoords
+      ? getScooterToFerryCombo(
+          location.lat,
+          location.lng,
+          nearestTerminal.terminal as any,
+          terminalCoords.lat,
+          terminalCoords.lng
+        )
+      : Promise.resolve(null),
   ]);
-  const ferry = getFerrySchedule("sausalito");
 
   const options = [bus, ferry, bike, combo].filter(
     (o): o is NonNullable<typeof o> => o !== null
   );
 
+  // Be transparent about what was and wasn't considered relevant, and why --
+  // this is the "where are you calculating my position" answer, up front.
+  const relevanceNotes: string[] = [];
+  if (nearestStop) relevanceNotes.push(`nearest bus stop: ${nearestStop.name} (${nearestStop.distanceKm.toFixed(1)}km)`);
+  else relevanceNotes.push("no SF Muni stop close enough to be relevant");
+  if (nearestTerminal) relevanceNotes.push(`nearest ferry terminal: ${nearestTerminal.terminal} (${nearestTerminal.distanceKm.toFixed(1)}km)`);
+  else relevanceNotes.push("no ferry terminal close enough to be relevant");
+
   if (options.length === 0) {
-    await space.send("Couldn't get live data for any route right now — try again in a minute.");
+    await space.send(
+      `No viable live options near ${location.displayName} right now (${relevanceNotes.join(", ")}).`
+    );
     continue;
   }
 
   const decision = await decide(options, {
     what: goal,
     whenISO: "",
-    where: "",
+    where: location.displayName,
   });
 
   if (!decision) {
@@ -82,12 +142,12 @@ for await (const [space, message] of app.messages) {
     continue;
   }
 
-  const pretty = decision.choice.replace(/_/g, " ");
+  const winner = options.find((o) => o.mode.replace(/[^a-zA-Z0-9]/g, "_") === decision.choice);
   const probsLine = Object.entries(decision.probabilities)
     .map(([k, v]) => `${k.replace(/_/g, " ")}: ${(v * 100).toFixed(0)}%`)
     .join(", ");
 
   await space.send(
-    `Take the ${pretty} (confidence ${(decision.confidence * 100).toFixed(0)}%)\n${probsLine}`
+    `${narrate(winner, decision.confidence)}\n\n(${probsLine} — ${relevanceNotes.join(", ")})`
   );
 }

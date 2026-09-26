@@ -10,6 +10,200 @@ type TransportOption = {
 
 const FIVE_ELEVEN_TOKEN = process.env.FIVE_ELEVEN_TOKEN;
 
+/** Fixed ferry terminal locations (verified coordinates). */
+export const FERRY_TERMINALS: Record<string, { lat: number; lng: number }> = {
+  sausalito: { lat: 37.8419, lng: -122.4785 },
+  larkspur: { lat: 37.945, lng: -122.5089 },
+  tiburon: { lat: 37.8735, lng: -122.4566 },
+};
+
+/**
+ * Real geocoding via OpenStreetMap Nominatim (free, no API key). A
+ * descriptive User-Agent is required by Nominatim's usage policy or
+ * requests get blocked.
+ */
+export async function geocode(
+  query: string
+): Promise<{ lat: number; lng: number; displayName: string } | null> {
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
+      query
+    )}&format=json&limit=1`;
+    const res = await fetch(url, {
+      headers: { "User-Agent": "Jevathon-CommuteAssistant/1.0 (hackathon project)" },
+    });
+    if (!res.ok) return null;
+    const results = await res.json();
+    if (!Array.isArray(results) || results.length === 0) return null;
+    const r = results[0];
+    return { lat: parseFloat(r.lat), lng: parseFloat(r.lon), displayName: r.display_name };
+  } catch {
+    return null;
+  }
+}
+
+const FILLER_WORDS = new Set([
+  "i",
+  "im",
+  "i'm",
+  "need",
+  "to",
+  "get",
+  "from",
+  "form", // common typo for "from"
+  "the",
+  "a",
+  "an",
+  "at",
+  "by",
+  "heading",
+  "head",
+  "going",
+  "go",
+  "office",
+  "offices",
+  "what's",
+  "whats",
+  "what",
+  "is",
+  "way",
+  "do",
+  "it",
+  "how",
+  "should",
+  "that",
+  "work",
+  "where",
+  "and",
+  "for",
+  "my",
+  "please",
+  "can",
+  "you",
+  "help",
+  "me",
+  "best",
+  "there",
+]);
+
+/**
+ * Turn a free-text message into an ordered list of candidate place queries
+ * to try geocoding, since Nominatim needs a real place name, not a full
+ * sentence (verified: geocoding the raw sentence returns nothing). Jev
+ * can't do this extraction itself -- it's a discriminative model (Choice/
+ * Score/Noul), not a text generator -- so this is a plain heuristic:
+ * split on common origin/destination separator words, strip filler words
+ * from each segment, and return non-empty segments as candidates, longest
+ * (most specific) first.
+ */
+export function extractPlaceQueries(text: string): string[] {
+  const cleaned = text.toLowerCase().replace(/[^a-z0-9\s']/g, " ");
+  const segments = cleaned.split(/\bto\b|\bfrom\b|\bform\b/);
+
+  const candidates = new Set<string>();
+  for (const seg of segments) {
+    const words = seg.split(/\s+/).filter((w) => w && !FILLER_WORDS.has(w));
+    if (words.length > 0) candidates.add(words.join(" "));
+  }
+  // Also try the whole message filler-stripped, as a fallback.
+  const allWords = cleaned.split(/\s+/).filter((w) => w && !FILLER_WORDS.has(w));
+  if (allWords.length > 0) candidates.add(allWords.join(" "));
+
+  return [...candidates].sort((a, b) => b.length - a.length);
+}
+
+/**
+ * Try each candidate place query in order until one actually geocodes to a
+ * real place. Returns null (not a fabricated fallback location) if none do.
+ */
+const SF_CENTER = { lat: 37.7749, lng: -122.4194 };
+const MAX_REASONABLE_KM_FROM_SF = 150; // this app only makes sense for Bay Area commutes;
+// a geocode that lands 6000km away (e.g. garbage input fuzzy-matching an
+// unrelated town somewhere) is more likely a bad match than a real ask.
+
+export async function resolveLocation(
+  text: string
+): Promise<{ lat: number; lng: number; displayName: string; matchedQuery: string } | null> {
+  for (const query of extractPlaceQueries(text)) {
+    const result = await geocode(query);
+    if (!result) continue;
+    if (haversineKm(result.lat, result.lng, SF_CENTER.lat, SF_CENTER.lng) > MAX_REASONABLE_KM_FROM_SF) {
+      continue; // reject and try the next candidate query instead of accepting a bad match
+    }
+    return { ...result, matchedQuery: query };
+  }
+  return null;
+}
+
+let stopsCache: { stops: { id: string; name: string; lat: number; lng: number }[]; fetchedAt: number } | null =
+  null;
+const STOPS_CACHE_MS = 60 * 60 * 1000; // stop locations don't change; refresh hourly
+
+async function getAllStops(): Promise<{ id: string; name: string; lat: number; lng: number }[]> {
+  if (stopsCache && Date.now() - stopsCache.fetchedAt < STOPS_CACHE_MS) return stopsCache.stops;
+  if (!FIVE_ELEVEN_TOKEN) return [];
+  try {
+    const res = await fetch(
+      `http://api.511.org/transit/stops?api_key=${FIVE_ELEVEN_TOKEN}&operator_id=SF&format=json`
+    );
+    if (!res.ok) return stopsCache?.stops ?? [];
+    const text = (await res.text()).replace(/^﻿/, "");
+    const data = JSON.parse(text);
+    const raw = data?.Contents?.dataObjects?.ScheduledStopPoint ?? [];
+    const stops = raw
+      .filter((s: any) => s.Location?.Latitude && s.Location?.Longitude)
+      .map((s: any) => ({
+        id: s.id,
+        name: s.Name,
+        lat: parseFloat(s.Location.Latitude),
+        lng: parseFloat(s.Location.Longitude),
+      }));
+    stopsCache = { stops, fetchedAt: Date.now() };
+    return stops;
+  } catch {
+    return stopsCache?.stops ?? [];
+  }
+}
+
+/** Find the nearest real SF Muni stop to a location, or null if the nearest
+ * one is farther than maxKm (i.e. this location isn't realistically served
+ * by this stop -- don't offer a bus option that isn't actually relevant). */
+export async function findNearestStop(
+  lat: number,
+  lng: number,
+  maxKm = 2
+): Promise<{ id: string; name: string; distanceKm: number } | null> {
+  const stops = await getAllStops();
+  if (stops.length === 0) return null;
+  let nearest = stops[0]!;
+  let nearestDist = haversineKm(lat, lng, nearest.lat, nearest.lng);
+  for (const s of stops) {
+    const d = haversineKm(lat, lng, s.lat, s.lng);
+    if (d < nearestDist) {
+      nearest = s;
+      nearestDist = d;
+    }
+  }
+  if (nearestDist > maxKm) return null;
+  return { id: nearest.id, name: nearest.name, distanceKm: nearestDist };
+}
+
+/** Find the nearest ferry terminal, or null if farther than maxKm (not a
+ * realistic ferry option from this location). */
+export function findNearestTerminal(
+  lat: number,
+  lng: number,
+  maxKm = 8
+): { terminal: string; distanceKm: number } | null {
+  let best: { terminal: string; distanceKm: number } | null = null;
+  for (const [name, coords] of Object.entries(FERRY_TERMINALS)) {
+    const d = haversineKm(lat, lng, coords.lat, coords.lng);
+    if (!best || d < best.distanceKm) best = { terminal: name, distanceKm: d };
+  }
+  if (!best || best.distanceKm > maxKm) return null;
+  return best;
+}
+
 /** Live bus/Muni status via 511.org Stop Monitoring API. */
 export async function getBusStatus(stopId: string, agency = "SF"): Promise<TransportOption | null> {
   if (!FIVE_ELEVEN_TOKEN) return null;
